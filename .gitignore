@@ -1,2 +1,3 @@
-/db.psql
-/test.sql
+*.csv
+__pycache__/
+*.pyc
