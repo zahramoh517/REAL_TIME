@@ -57,3 +57,36 @@ python -m watchdog.watchdog
   Set to `False` for a real live run.
 - `producer/replay_producer.py` has `REPLAY_DELAY_SECONDS` -- lower this for
   a fast test run instead of waiting for a realistic-speed replay.
+
+## TODO / things to clean up before I'd call this done
+
+- **Flip `TESTING` back to `False` in watchdog.py** before any kind of real
+  run -- right now it's reading the latest timestamp in the data instead of
+  the actual clock, which only makes sense because I'm working against
+  replayed historical data, not live.
+- **Double check the sleep intervals are back to real values** --
+  `REPLAY_DELAY_SECONDS` and `SWEEP_INTERVAL_SECONDS` get turned way down
+  while testing so I'm not sitting around for an hour, easy to forget to
+  put back.
+- **Known issue: almost everything gets flagged "Late."** Traced this back
+  to how the synthetic data was generated -- the route_reference table picks
+  random intermediate hubs without checking if they're anywhere near the
+  actual route (e.g. a Gatineau -> Montreal shipment got routed through
+  Lethbridge, AB), and the expected arrival windows are random offsets that
+  don't account for real travel distance at all. Meanwhile the actual event
+  timestamps *are* based on real distance/speed math. So the two don't line
+  up, and almost everything reads as behind schedule -- it's not a bug in
+  the schedule-check logic itself, it's the test data being internally
+  inconsistent. If I were doing this for real, the fix is to generate
+  expected windows from the same distance/speed assumptions as the events,
+  or just use a real routing API for the "expected" side.
+- Add the XPENDING / XCLAIM sweep to the watchdog for reclaiming stuck
+  Redis messages and logging them as `system_error` alerts -- designed this
+  conceptually, never actually wired it in.
+- The WebSocket in `api/main.py` polls Postgres every 2 seconds instead of
+  getting pushed updates directly from the consumer/watchdog via Redis
+  pub/sub. Works fine for a demo, but there's a built-in ~2s lag. Would
+  switch this to pub/sub for anything real.
+- Haven't stress-tested what happens if the consumer or watchdog crashes
+  mid-run and gets restarted -- should revisit the pending-message handling
+  once the XPENDING piece above is in.
