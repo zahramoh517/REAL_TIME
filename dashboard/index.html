@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fleet Console</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root {
+    --bg: #10141b;
+    --panel: #181f29;
+    --border: #262f3b;
+    --text: #e7ebf0;
+    --muted: #8a96a6;
+    --accent: #5b9bd1;
+    --amber: #e3a857;
+    --red: #d9534f;
+    --purple: #9b7fd4;
+    --mono: "SF Mono", "Consolas", "Menlo", monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  #topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+
+  #topbar h1 {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: 0.2px;
+  }
+
+  #status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+  }
+  .dot.live { background: #5fb878; }
+
+  #layout {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    height: calc(100vh - 53px);
+  }
+
+  #sidebar {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 16px;
+  }
+
+  #sidebar h2 {
+    font-size: 11px;
+    text-transform: none;
+    color: var(--muted);
+    margin: 0 0 12px 0;
+    font-weight: 600;
+  }
+
+  .alert-card {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    background: #141a23;
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .alert-card:hover { border-color: #3a4556; }
+  .alert-card.off_schedule { border-left-color: var(--amber); }
+  .alert-card.stalled_transit, .alert-card.stalled_in_transit { border-left-color: var(--red); }
+  .alert-card.stalled_hub { border-left-color: var(--red); }
+  .alert-card.system_error { border-left-color: var(--purple); }
+
+  .alert-type {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+
+  .alert-shipment {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+  }
+
+  .alert-time {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  #empty-alerts {
+    color: var(--muted);
+    font-size: 13px;
+    padding: 8px 0;
+  }
+
+  #map { height: 100%; width: 100%; background: var(--bg); }
+  .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9); }
+  .leaflet-marker-pane, .leaflet-popup-pane { filter: none; }
+
+  .leaflet-popup-content-wrapper {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .leaflet-popup-tip { background: var(--panel); }
+  .popup-row { font-family: var(--mono); font-size: 12px; margin: 2px 0; }
+  .popup-label { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <h1>Fleet Console</h1>
+  <div id="status"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
+</div>
+
+<div id="layout">
+  <div id="sidebar">
+    <h2>Active alerts</h2>
+    <div id="alertsList"><div id="empty-alerts">No active alerts yet.</div></div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script>
+  const API_BASE = "http://localhost:8000";
+  const WS_URL = "ws://localhost:8000/ws/live";
+
+  const map = L.map('map', { zoomControl: true }).setView([51.5, -95.0], 4.4);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(map);
+
+  const markers = {}; // shipment_id -> L.circleMarker
+  const shipmentStatus = {}; // shipment_id -> latest alert_type ('' = none)
+
+  const COLORS = {
+    '': '#5b9bd1',
+    'off_schedule': '#e3a857',
+    'stalled_hub': '#d9534f',
+    'stalled_in_transit': '#d9534f',
+    'stalled_transit': '#d9534f',
+    'system_error': '#9b7fd4'
+  };
+
+  function colorFor(shipmentId) {
+    return COLORS[shipmentStatus[shipmentId] || ''] || COLORS[''];
+  }
+
+  function upsertMarker(shipmentId, lat, lon, info) {
+    if (lat == null || lon == null) return;
+    if (markers[shipmentId]) {
+      markers[shipmentId].setLatLng([lat, lon]);
+      markers[shipmentId].setStyle({ fillColor: colorFor(shipmentId), color: colorFor(shipmentId) });
+    } else {
+      const m = L.circleMarker([lat, lon], {
+        radius: 6,
+        color: colorFor(shipmentId),
+        fillColor: colorFor(shipmentId),
+        fillOpacity: 0.85,
+        weight: 1
+      }).addTo(map);
+      markers[shipmentId] = m;
+    }
+    if (info) {
+      markers[shipmentId].bindPopup(
+        `<div class="popup-row"><span class="popup-label">Shipment</span> ${shipmentId.slice(0, 8)}</div>` +
+        `<div class="popup-row"><span class="popup-label">PO#</span> ${info.po_number ?? '—'}</div>` +
+        `<div class="popup-row"><span class="popup-label">Route</span> ${info.source ?? '?'} → ${info.destination ?? '?'}</div>` +
+        `<div class="popup-row"><span class="popup-label">Hub</span> ${info.hub_name || 'in transit'}</div>`
+      );
+    }
+  }
+
+  function renderAlertCard(alert, prepend) {
+    const list = document.getElementById('alertsList');
+    const empty = document.getElementById('empty-alerts');
+    if (empty) empty.remove();
+
+    const card = document.createElement('div');
+    card.className = 'alert-card ' + alert.alert_type;
+    card.innerHTML =
+      `<div class="alert-type">${alert.alert_type.replace(/_/g, ' ')}</div>` +
+      `<div class="alert-shipment">${(alert.shipment_id || '').slice(0, 8)}</div>` +
+      `<div class="alert-time">${alert.created_at ? new Date(alert.created_at).toLocaleString() : ''}</div>`;
+    card.onclick = () => {
+      const m = markers[alert.shipment_id];
+      if (m) { map.setView(m.getLatLng(), 7); m.openPopup(); }
+    };
+
+    if (prepend) list.prepend(card); else list.appendChild(card);
+  }
+
+  async function loadInitialState() {
+    const shipments = await fetch(API_BASE + '/shipments').then(r => r.json());
+    shipments.forEach(s => {
+      if (s.lat != null && s.lon != null) {
+        upsertMarker(s.shipment_id, s.lat, s.lon, s);
+      }
+    });
+
+    const alerts = await fetch(API_BASE + '/alerts').then(r => r.json());
+    alerts.forEach(a => { shipmentStatus[a.shipment_id] = a.alert_type; });
+    alerts.forEach(a => renderAlertCard(a, false));
+    alerts.forEach(a => { if (markers[a.shipment_id]) markers[a.shipment_id].setStyle({ fillColor: colorFor(a.shipment_id), color: colorFor(a.shipment_id) }); });
+  }
+
+  function connectLive() {
+    const ws = new WebSocket(WS_URL);
+    const dot = document.getElementById('statusDot');
+    const text = document.getElementById('statusText');
+
+    ws.onopen = () => { dot.classList.add('live'); text.textContent = 'live'; };
+    ws.onclose = () => {
+      dot.classList.remove('live'); text.textContent = 'reconnecting…';
+      setTimeout(connectLive, 2000);
+    };
+    ws.onerror = () => ws.close();
+
+    ws.onmessage = (msg) => {
+      const payload = JSON.parse(msg.data);
+      if (payload.type === 'event') {
+        const e = payload.data;
+        upsertMarker(e.shipment_id, e.lat, e.lon, null);
+      } else if (payload.type === 'alert') {
+        const a = payload.data;
+        shipmentStatus[a.shipment_id] = a.alert_type;
+        if (markers[a.shipment_id]) markers[a.shipment_id].setStyle({ fillColor: colorFor(a.shipment_id), color: colorFor(a.shipment_id) });
+        renderAlertCard(a, true);
+      }
+    };
+  }
+
+  loadInitialState().then(connectLive);
+</script>
+
+</body>
+</html>
