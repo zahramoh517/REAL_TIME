@@ -35,11 +35,6 @@ CREATE TABLE alerts (
     status TEXT DEFAULT 'active',
     created_at TIMESTAMP DEFAULT now(),
     resolved_at TIMESTAMP
-);
-
--- One-time seed load. Table 1 and Table 3 are static reference data,
--- loaded straight from CSV. Table 2 (events) is NOT loaded this way in
--- the real pipeline -- it's populated live by the consumer, reading off
--- the Redis stream. See producer/replay_producer.py and consumer/consumer.py.
+)
 COPY shipments FROM "" DELIMITER ',' CSV HEADER;
 COPY route_reference FROM "" DELIMITER ',' CSV HEADER;
